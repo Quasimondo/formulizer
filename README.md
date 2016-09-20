@@ -7,6 +7,9 @@ http://quasimondo.com/QuasimondoLibsJS/demos/formulizer.html?f=%7E%28%28y%7C%3D9
 Licenced under the Non-Profit Open Software License version 3.0 (NPOSL-3.0)
 https://opensource.org/licenses/NPOSL-3.0
 
-If you create publicly visible derivatives of this code you have to display
+If you create publicly visible derivatives of this code you have to display this line:
+
 "Based on <a href="http://quasimondo.com/QuasimondoLibsJS/demos/formulizer.html">Formulizer II</a> by Mario Klingemann"
-visibly on the same page.
+
+(just putting it into the source code is not sufficient)
+
