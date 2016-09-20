@@ -1,0 +1,675 @@
+<html>
+<head>
+<meta charset="utf-8">
+	<title>Formulizer II by Mario Klingemann / @Quasimondo</title>
+	<link href="css/ui-darkness/jquery-ui-1.10.3.custom.css" rel="stylesheet">
+	<script src="js/jquery-1.9.1.js"></script>
+	<script src="js/jquery-ui-1.10.3.custom.min.js"></script>
+	<script src="js/qlib_min.js"></script>
+	<script>
+	//Copyright 2014 Mario Klingemann
+    //
+    // Licenced under the Non-Profit Open Software License version 3.0 (NPOSL-3.0)
+    // https://opensource.org/licenses/NPOSL-3.0
+	
+	var seed = Math.floor(Math.random()*0xffffffff);
+	var initialized = false;
+	var typeTimeoutID;
+	var outputMap;
+	var colorMode;
+	var canvasHolder;
+	var rgb2yuv;
+	var workerCount = 4;
+	var workers; 
+	var workersComplete;
+	var regx = /(0x[0-9a-fA-F]+)|(\d*\.?\d+e?-?\.?\d+)|(\.?\d+\.?)/ig;
+	var varx = /[^a-z]([xywhtdm])[^a-z]/ig;
+	var undoStorage = [];
+	var lastValue;
+	$(function() {
+		
+		$( "#rnd_button" ).button();
+		$( "#rnd_button" ).click( randomizeFormula );
+		$( "#rndno_button" ).button();
+		$( "#rndno_button" ).click( randomizeNumbers );
+		$( "#rndv_button" ).button();
+		$( "#rndv_button" ).click( randomizeVariables );
+		$( "#undo_button" ).button();
+		$( "#undo_button" ).click( undo );
+		
+		
+		$( "#randomRangeSlider" ).slider({
+			range: true,
+			min: 0,
+			max: 255,
+			values: [0,255],
+			slide: function(event, ui) {
+				var minValue = Math.pow( ui.values[0],3);
+				var maxValue = Math.pow(ui.values[1],3);
+			
+				$("#randomRangeSliderLabel").text("Random Number Range: "+minValue.toString(16)+" - "+maxValue.toString(16));
+			}
+		});
+		
+		$("#randomRangeSliderLabel").text("Random Number Range: 0 - "+(0xffffff).toString(16));
+		
+		$( "#widthSlider" ).slider({
+			min: 16,
+			max: 4096,
+			value: 600,
+			change: sizeChanged,
+			slide: function(event, ui) {
+				$("#widthSliderLabel").text("Width: "+ui.value);
+			}
+			
+		});
+		
+		$("#widthSliderLabel").text("Width: 600");
+		
+		$( "#heightSlider" ).slider({
+			min: 16,
+			max: 4096,
+			value: 600,
+			change: sizeChanged,
+			slide: function(event, ui) {
+				$("#heightSliderLabel").text("Height: "+ui.value);
+			}
+		});
+		
+		$("#heightSliderLabel").text("Height: 600");
+		
+		
+		$( "#bitshiftSlider" ).slider({
+			min: 0,
+			max: 32,
+			value: 0,
+			slide: function(event, ui) {
+				$("#bitshiftSliderLabel").text("Bitshift: "+ui.value);
+				 parseUserFormula();
+			}
+		});
+		
+		$("#bitshiftSliderLabel").text("Bitshift: 0");
+		
+		$( "#complexitySlider" ).slider({
+			min: 2,
+			max: 50,
+			value: 8
+		});
+		
+		$( "#formula_txt" ).bind("keyup",triggerParseUserFormula )
+		
+		$('#formula_txt').bind('mousewheel DOMMouseScroll', function(e) {
+
+			e.preventDefault();
+			var delta = e.wheelDelta || -e.detail || e.originalEvent.wheelDelta || -e.originalEvent.detail;
+			if ( delta != 0 )
+			{
+				delta = ( delta > 0 ? 1 : -1);
+				var selectedText = getSelection();
+				if ( selectedText != null && selectedText.length > 0 )
+				{
+					var matches = selectedText.match(/([\d\.]+)/g);
+					if ( matches != null )
+					{
+						for ( var i = 0; i < matches.length; i++ )
+						{
+							if ( !isNaN(parseFloat(matches[i])))
+							{
+								var result;
+								result = Math.abs(parseFloat(matches[i])+delta);
+								
+								selectedText = selectedText.replace(matches[i],result);
+							}
+						}
+						setSelection(selectedText);
+						triggerParseUserFormula();
+					}
+				}
+				
+			}
+		});
+
+		
+		$("#share").focus(function() { $(this).select(); } );
+		
+		$("#errorBox").hide();
+		
+		colorMode = document.getElementById("colormode");
+		rgb2yuv = new qlib.ColorMatrixFilter([ 0.29900,  0.58700,  0.11400, 0, 0,
+                                        -0.16874, -0.33126,  0.50000, 0, 128,
+                                         0.50000, -0.41869, -0.08131, 0, 128,
+                                         0      ,  0      ,  0      , 1, 0  ]);
+		
+		workers = [];
+		for ( var i = 0; i < workerCount; i++)
+		{
+			workers.push( new Worker('formulizer-worker.js'));
+			workers[i].onmessage = onWorkerComplete; 
+		}
+		init();
+	});
+	
+	
+	
+	function init()
+	{
+		canvasHolder = document.getElementById("canvasHolder");
+		outputMap = document.getElementById("output").bitmapData;
+		initialized = true;
+		 if ( location.search != "") {
+			var q=location.search.substr(1);
+			if ( q.indexOf("f=")==0 )
+			{
+				var p = q.split("&");
+				for ( var i=0;i < p.length;i++)
+				{
+					var q = unescape(p[i].substr(2));
+					switch ( p[i].charAt(0) )
+					{
+						case "f":
+							$( "#formula_txt" ).text(q);
+							break;
+						case "h":
+							$( "#heightSlider" ).slider("value",parseInt(q,10));
+							break;
+						case "w":
+							$( "#widthSlider" ).slider("value",parseInt(q,10));
+							break;
+						case "m":
+							colorMode.selectedIndex = parseInt(q,10);
+							break;
+					}
+				}
+				
+			} else {
+				q = unescape(q);
+				if ( q == "((m/(t/t))>>(((w-15485335)<<(t&15))&15" ) q+="))";
+				$( "#formula_txt" ).val(q);
+			}
+		}
+		setSeed(Math.floor(Math.random()*0xffffffff));
+		sizeChanged();
+	}
+	
+	function undo()
+	{
+		undoStorage.pop();
+		if (undoStorage.length>0){
+			$( "#formula_txt" ).val(undoStorage.pop());
+			parseUserFormula();
+		}	
+	}
+	function sizeChanged()
+	{
+		$("#heightSliderLabel").text("Height: "+$("#heightSlider").slider( "option", "value" ));
+		$("#widthSliderLabel").text("Width: "+$("#widthSlider").slider( "option", "value" ));
+				
+		canvasHolder.removeChild(document.getElementById("output"));
+		var output = document.createElement("canvas");
+		output.setAttribute('id', 'output');
+		output.width = $("#widthSlider").slider( "option", "value" );
+		output.height = $("#heightSlider").slider( "option", "value" );
+		canvasHolder.appendChild(output)
+		outputMap = document.getElementById("output").bitmapData;
+		outputMap.fillRect(outputMap.rect,0xffffffff);
+		parseUserFormula();
+	}
+	
+	function getSelection()
+	{
+	  var textComponent = document.getElementById('formula_txt');
+	  var selectedText;
+	  // IE version
+	  if (document.selection != undefined)
+	  {
+		textComponent.focus();
+		var sel = document.selection.createRange();
+		selectedText = sel.text;
+	  }
+	  // Mozilla version
+	  else if (textComponent.selectionStart != undefined)
+	  {
+		var startPos = textComponent.selectionStart;
+		var endPos = textComponent.selectionEnd;
+		selectedText = textComponent.value.substring(startPos, endPos)
+	  }
+	  return selectedText;
+	}
+	
+	function setSelection( newText )
+	{
+	  var textComponent = document.getElementById('formula_txt');
+	
+	  // IE version
+	  if (document.selection != undefined)
+	  {
+		textComponent.focus();
+		var sel = document.selection.createRange();
+		sel.text = newText;
+	  }
+	  // Mozilla version
+	  else if (textComponent.selectionStart != undefined)
+	  {
+		var startPos = textComponent.selectionStart;
+		var endPos = textComponent.selectionEnd;
+		textComponent.value = textComponent.value.substring(0,startPos) + newText + textComponent.value.substring(endPos, textComponent.value.length);
+		textComponent.selectionStart = startPos;
+		textComponent.selectionEnd = endPos + ( newText.length - (endPos - startPos));
+	  }
+	 
+	}
+	
+	function randomizeFormula()
+	{
+		if ( !initialized ) init();
+		setSeed(Math.floor(Math.random()*0xffffffff));
+		seed = Math.floor(Math.random()*0x7fffffff);
+		
+		var formula = getFormula(seed, $("#complexitySlider").slider( "option", "value" ));
+		
+		$("#formula_txt").val( formula );
+		parseUserFormula();
+	}
+	
+	
+	function randomizeNumbers()
+	{
+		regx.lastIndex = 0;
+		var lowValue = Math.pow($("#randomRangeSlider").slider( "option", "values" )[0],3);
+		var highValue = Math.pow($("#randomRangeSlider").slider( "option", "values" )[1],3);
+		var found=0;
+		var replaced =0;
+		var formula = $("#formula_txt").val();
+		var prob=0.5;
+		while ( true )
+		{
+			while ( true )
+			{
+				var result = regx.exec( formula );
+				if ( result == null ) break;
+				found++;
+				if ( !(result[0]=="2" && formula.charAt(result.index-1)=="n") )
+				{
+					if ( Math.random()>prob)
+					{
+						var replacement = String(rnd(lowValue,highValue));
+						formula = formula.substr(0,result.index) + replacement +  formula.substr(result.index+result[0].length );
+						regx.lastIndex += replacement.length - result[0].length;
+						replaced++;
+					}
+				}
+			}
+			if ( found==0 || replaced>0 ) break;
+			regx.lastIndex = 0;
+			prob *= 0.5;
+		}
+		$("#formula_txt").val(formula);
+		parseUserFormula();
+	}
+	
+	function randomizeVariables()
+	{
+		varx.lastIndex = 0;
+	
+		var formula = $("#formula_txt").val();
+		while ( true )
+		{
+			var result = varx.exec( formula );
+			if ( result == null ) break;
+			formula = formula.substr(0, result.index+1) + "xywhtdm".charAt((Math.random()*7)|0) + formula.substr(result.index+2)
+		}
+		
+		$("#formula_txt").val(formula);
+		parseUserFormula();
+	}
+	
+	
+
+	function triggerParseUserFormula()
+	{
+		clearTimeout( typeTimeoutID );
+		typeTimeoutID = setTimeout( parseUserFormula,300);
+	}
+	
+	function parseUserFormula()
+	{
+		if ( undoStorage.length == 0 || undoStorage[undoStorage.length-1] !=  $("#formula_txt").val() ) undoStorage.push( $("#formula_txt").val());
+		
+		var w = $("#widthSlider").slider( "option", "value" );
+		var h = $("#heightSlider").slider( "option", "value" );
+		var bs = $("#bitshiftSlider").slider( "option", "value" );
+		
+		try
+		{
+			var code = "var w="+w+";var h="+h+";var x=t%w;var y=(t/w)|0;var dx=x-(w>>1);var dy=y-(h>>1);var m=Math.sqrt(dx*dx+dy*dy);var d=Math.atan2(dy,dx)/Math.PI*512;return "+ $("#formula_txt").val() +";";
+			var testFn  = new Function("t", code );
+			var test = testFn(0);
+			imgFn = testFn;
+			$("#errorMessage").text("");
+			$("#errorBox").hide();
+			$("#share").val("http://quasimondo.com/QuasimondoLibsJS/demos/formulizer.html?f="+escape($("#formula_txt").val())+"&w="+w+"&h="+h+"&b="+bs+"&m="+colorMode.selectedIndex);
+		} catch ( e )
+		{
+			$("#errorMessage").text(e.toString());
+			$("#errorBox").show();
+			return;
+		}
+		
+		/*
+		for ( var i = 0; i < workerCount; i++)
+		{
+			workers[i].terminate();
+		}
+        */
+        
+		var chunkSize = (outputMap.buf32.length / workerCount)|0;
+		var tStart = 0;
+		workersComplete = 0;
+		for ( var i = 0; i < workerCount; i++)
+		{
+			//workers[i] = new Worker('formulizer-worker.js');
+			//workers[i].onmessage = onWorkerComplete; 
+			workers[i].postMessage({
+				buf32: outputMap.buf32,
+				code:code,
+				w:w,
+				h:h,
+				bs:bs,
+				tStart:tStart,
+				tEnd:tStart+chunkSize,
+				colorMode:colorMode.selectedIndex 
+			});
+			tStart+=chunkSize;
+			if ( i == workerCount-1) chunkSize = outputMap.buf32.length - tStart;
+		}
+	}
+	
+	function getFormula( masterSeed, steps)
+	{
+		var lowValue = Math.pow($("#randomRangeSlider").slider( "option", "values" )[0],3);
+		var highValue = Math.pow($("#randomRangeSlider").slider( "option", "values" )[1],3);
+				
+		var actionStack = [];    
+		var v1, v2, v3, v4;
+		var stackpointer = 0;
+		setSeed(masterSeed);
+		var maxCommand = $("#allowMath").attr("checked") ? 21 : 19;
+		
+		for ( var k = 0; (k < steps || stackpointer > 1 ); k++ )
+		{
+			var command = rnd(0,maxCommand);
+			if ( stackpointer < 2 )
+			{
+				if ( command < 10 )
+				{
+					actionStack[stackpointer++] = ["t","x","y","w","h","d","m"][rnd(0,6)];
+				} else {	
+					actionStack[stackpointer++] = rnd(lowValue,highValue);
+				}
+			} else {
+				
+				switch( command )
+				{
+					case 0:
+					case 1:
+						actionStack[stackpointer++] = ["t","x","y","w","h","d","m"][rnd(0,6)];
+						break;
+					case 2:
+					case 3:
+						actionStack[stackpointer++] = rnd(lowValue,highValue);
+						break;
+					case 4:
+						actionStack[stackpointer++] = ["t","x","y","w","h","d","m"][rnd(0,6)]+[">>","<<"][rnd(0,1)]+rnd(0,32);
+						break;
+					case 5:
+					case 6:
+						v1 = actionStack[--stackpointer];
+						v2 = actionStack[--stackpointer];
+						actionStack[stackpointer++] = v1+["*","+","-","%","|","&","^","/","<<",">>"][rnd(0,9)]+v2;
+						break;
+					case 7:
+					case 8:
+						v1 = actionStack[--stackpointer];
+						v2 = actionStack[--stackpointer];
+						actionStack[stackpointer++] = v1+["*","+","-","%","|","&","^","/","<<",">>"][rnd(0,9)]+v2;
+						break;
+					case 9:
+						v1 = actionStack[--stackpointer];
+						actionStack[stackpointer++] = "("+["t","x","y","w","h","d","m"][rnd(0,6)]+["*","+","-","%","|","&","^","/","<<",">>"][rnd(0,9)]+"="+v1+")";
+						break;
+					case 10:
+						v1 = actionStack[--stackpointer];
+						v2 = actionStack[--stackpointer] ;
+						actionStack[stackpointer++] = v1+"<<("+v2+"&31)";
+						break;
+					case 11:
+						v1 = actionStack[--stackpointer];
+						v2 = actionStack[--stackpointer];
+						actionStack[stackpointer++] = v1+">>("+v2+"&31)";
+						break;
+					
+					case 12:
+						actionStack[stackpointer++] = actionStack[stackpointer-2];
+						break;
+					
+					case 13:
+						v1 =  actionStack[stackpointer-1];
+						actionStack[stackpointer-1] = actionStack[stackpointer-2];
+						actionStack[stackpointer-2] = v1;
+						break;
+					
+					case 14:
+						if ( stackpointer > 3 )
+						{
+							v1 = actionStack[--stackpointer];
+							v2 = actionStack[--stackpointer];
+							v3 = actionStack[--stackpointer];
+							v4 = actionStack[--stackpointer];
+							
+							var sign = ["==","!=","<",">","<=",">="][rnd(0,5)];
+							actionStack[stackpointer++] = "("+v1+sign+v2+"?"+v3+":"+v4+")";
+						} else {
+							k--;
+						}
+						
+						break;
+					case 15:
+						if ( stackpointer > 2 )
+						{
+							v1 = actionStack[--stackpointer];
+							v2 = actionStack[--stackpointer];
+							v3 = actionStack[--stackpointer];
+							var sign = ["==","!=","<",">","<=",">="][rnd(0,5)];
+							actionStack[stackpointer++] = "("+v1+sign+v2+")*"+v3;
+						} else {
+							k--;
+						}
+						
+						break;
+					case 16:
+						actionStack[stackpointer-1] ="~"+ actionStack[stackpointer-1];
+						break;
+					case 17:
+					case 18:
+						actionStack[stackpointer-1] ="("+ actionStack[stackpointer-1]+")";
+						break;
+					case 19:
+						var count = rnd(2,16);
+						var melody2 = [];
+						for ( var i = 0; i < count; i++ )
+						{
+							melody2.push( rnd(lowValue,highValue ) );
+						}
+						v1 = actionStack[--stackpointer];
+						actionStack[stackpointer++] = '['+melody2.join(", ")+'][(Math.abs('+v1+')|0)%'+count+']'
+					break;
+					case 20:
+						var f = ["min","max","atan2","pow"][rnd(0,3)];
+						v1 = actionStack[--stackpointer];
+						v2 = actionStack[--stackpointer] ;
+						actionStack[stackpointer++] = "Math."+f+"("+v1+","+v2+")";
+						break;
+					case 21:
+						var f = ["sin","cos","tan","sqrt","exp","log","floor","ceil","round","abs","acos","asin","atan"][rnd(0,12)];
+						actionStack[stackpointer-1] ="Math."+f+"("+actionStack[stackpointer-1]+")";
+						break;
+						
+				}
+			}
+		}
+		
+		return actionStack[0];
+	}
+
+	function setSeed( newSeed )
+	{
+		seed = newSeed;
+		
+		m_seed0 = (69069*seed) & 0xffffffff;
+		if (m_seed0<2) {
+			m_seed0+=2;
+		}
+		
+		m_seed1 = (69069*m_seed0) & 0xffffffff;;
+		if (m_seed1<8) {
+			m_seed1+=8;
+		}
+		
+		m_seed2 = ( 69069 *m_seed1) & 0xffffffff;;
+		if (m_seed2<16) {
+			m_seed2+=16;
+		}
+		
+	}
+			
+	function getNextInt()
+	{
+		m_seed0 = ((( m_seed0 & 4294967294) << 12 )& 0xffffffff)^((((m_seed0<<13)&0xffffffff)^m_seed0) >>> 19 );
+		m_seed1 = ((( m_seed1 & 4294967288) << 4) & 0xffffffff)^((((m_seed1<<2)&0xffffffff)^m_seed1)>>>25)
+		m_seed2=  ((( m_seed2 & 4294967280) << 17) & 0xffffffff)^((((m_seed2<<3)&0xffffffff)^m_seed2)>>>11)
+		return (m_seed0 ^ m_seed1 ^ m_seed2) & 0x7fffffff;
+	}
+			
+	function rnd( min, max )
+	{
+		return Math.floor(0.5 + min + (getNextInt() / 0x7fffffff) * ( max - min ));
+	}
+	
+	function onWorkerComplete(event)
+	{
+		workersComplete++;
+		var tEnd = event.data.tEnd;
+		for ( var i = event.data.tStart; i < tEnd; i++ )
+		{		
+			outputMap.buf32[i] = event.data.buf32[i];
+		}
+		if ( workersComplete==workerCount )
+		{
+			outputMap.updateView();
+			if ( colorMode.selectedIndex==1)
+			{
+				outputMap.applyFilter(outputMap,null,null,rgb2yuv);
+			}
+		}
+	};
+	
+	
+
+	
+	</script>
+	
+	<style>
+	body{
+		font: 62.5% "Trebuchet MS", sans-serif;
+		margin: 50px;
+	}
+	
+	.headline{
+		font: 220% "Trebuchet MS", sans-serif;
+	}
+	
+	#uiHolder{
+		margin-right:12px;
+		float:left;
+	}
+	
+	#formula_txt{
+		width: 600px;
+		height: 200px;
+	}
+	
+	#randomRangeSlider,
+	#widthSlider,
+	#heightSlider,
+	#bitshiftSlider,
+	#complexitySlider{
+		margin-top: 5px;
+		width: 600px;
+	}
+	
+	#rnd_button,
+	#rndno_button,
+	#rndv_button,
+	#undo_button{
+		margin-top: 5px;
+		width:100px;
+	}
+	
+	#errorBox{
+		width: 585px;
+		margin-top: 5px;
+	}
+	
+	#share{
+		width: 88%;
+	}
+	</style>
+</head>
+<body>
+
+<div id="uiHolder">
+	<div><span class="headline"><strong>Formulizer II</strong></span> by Mario Klingemann <a href="http://twitter.com/quasimondo">@Quasimondo</a></div>
+	<p>Generate images from a single line of code.</p>
+	<div>
+		<textarea id="formula_txt">(((x>>2)^(y>>2))%3)*255</textarea> 
+		<div class="ui-state-error ui-corner-all" style="padding: 0 .7em;" id="errorBox">
+			<p><span class="ui-icon ui-icon-alert" style="float: left; margin-right: .3em;"></span>
+			<strong>Error:</strong> <span id="errorMessage"></span></p>
+		</div>
+		<div>Shareable Link: <input type="text" id="share"/></div>
+		<p>Available Variables:<br/>
+		<strong>t</strong>: pixel index<br/>
+		<strong>x,y</strong>: pixel x/y coordinate<br/>
+		<strong>w,h</strong>: canvas width/height<br/>
+		<strong>m</strong>: pixel distance to center<br/>
+		<strong>d</strong>: pixel angle to center in the range [-512 ... 512]</p>
+		<p>Press the Randomize button to generate a random formula. Many formulas will just produce a black image -<br/>
+		in that case just randomize again or change the formula manually. Randomize Numbers will keep the<br/>
+		formula and just replace some of the numbers, Randomize Variables will exchange some of the variables.<br/>
+		Use the mouse wheel to change selected number values.<br/>
+		To save image right-click it and select "Save Image As..."</p>
+		
+	</div>
+	<div><button id="rnd_button">Randomize Formula</button> <button id="rndno_button">Randomize Numbers</button> <button id="rndv_button">Randomize Variables</button>  <button id="undo_button">Undo</button>
+	<div style="float:right">Color Mode:
+	<select id="colormode" onchange="parseUserFormula()">
+		<option>RGB</option>
+		<option>YUV</option>
+		<option selected>Greyscale</option>
+		<option>Black and White</option>
+	</select><br/>
+	<input id="allowMath" type="checkbox"/> Allow Math Functions
+	</div>
+	</div>
+	<div id="widthSlider"></div><div id="widthSliderLabel">Width</div>
+	<div id="heightSlider"></div><div id="heightSliderLabel">Height</div>
+	<div id="bitshiftSlider"></div><div id="bitshiftSliderLabel">Bitshift</div>
+	<div id="randomRangeSlider"></div><div id="randomRangeSliderLabel">Random Number Range</div>
+	<div id="complexitySlider"></div><div id="complexitySliderLabel">Formula Complexity</div>
+</div>
+<div id="canvasHolder">
+	<canvas id="output" width="600" height="600"/>
+</div>
+</body>
+</html>
